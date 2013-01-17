@@ -16,7 +16,7 @@
 #import "TDReplicator.h"
 #import "TDPusher.h"
 #import "TDPuller.h"
-#import <TouchDB/TD_Database.h>
+#import "TD_Database+Replication.h"
 #import "TDRemoteRequest.h"
 #import "TDAuthorizer.h"
 #import "TDBatcher.h"
@@ -137,6 +137,14 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
 }
 
 
+- (bool) hasSameSettingsAs: (TDReplicator*)other {
+    return _db == other->_db && $equal(_remote, other->_remote) && self.isPush == other.isPush
+        && _continuous == other->_continuous && $equal(_filterName, other->_filterName)
+        && $equal(_filterParameters, other->_filterParameters) && $equal(_options, other->_options)
+        && $equal(_requestHeaders, other->_requestHeaders);
+}
+
+
 - (NSString*) lastSequence {
     return _lastSequence;
 }
@@ -196,6 +204,8 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
     Assert(_db, @"Can't restart an already stopped TDReplicator");
     LogTo(Sync, @"%@ STARTING ...", self);
 
+    [_db addActiveReplicator: self];
+
     // Did client request a reset (i.e. starting over from first sequence?)
     if (_options[@"reset"] != nil) {
         [_db setLastSequence: nil withCheckpointID: self.remoteCheckpointDocID];
@@ -214,6 +224,10 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
                      [self updateActive];
                  }
                 ];
+
+    // If client didn't set an authorizer, use basic auth if credential is available:
+    if (!_authorizer)
+        _authorizer = [[TDBasicAuthorizer alloc] initWithURL: _remote];
 
     self.running = YES;
     _startTime = CFAbsoluteTimeGetCurrent();
@@ -324,7 +338,7 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
         _lastSequence = nil;
         self.error = nil;
 
-        [self fetchRemoteCheckpointDoc];
+        [self login];
         [self postProgressChanged];
     }
     return YES;
@@ -416,6 +430,33 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
 }
 
 
+- (void) login {
+    if ([_authorizer respondsToSelector: @selector(loginParameters)]) {
+        NSDictionary* loginParameters = _authorizer.loginParameters;
+        if (loginParameters != nil) {
+            LogTo(Sync, @"Logging in with %@ at %@ ...", _authorizer.class, _authorizer.loginPath);
+            [self asyncTaskStarted];
+            [self sendAsyncRequest: @"POST"
+                              path: _authorizer.loginPath
+                              body: _authorizer.loginParameters
+                      onCompletion: ^(id result, NSError *error) {
+                          if (error) {
+                              LogTo(Sync, @"Login failed!");
+                              self.error = error;
+                          } else {
+                              LogTo(Sync, @"Successfully logged in!");
+                              [self fetchRemoteCheckpointDoc];
+                          }
+                          [self asyncTasksFinished: 1];
+                      }];
+            return;
+        }
+    }
+    
+    [self fetchRemoteCheckpointDoc];
+}
+
+
 #pragma mark - HTTP REQUESTS:
 
 
@@ -425,8 +466,12 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
                              onCompletion: (TDRemoteRequestCompletionBlock)onCompletion
 {
     LogTo(SyncVerbose, @"%@: %@ .%@", self, method, relativePath);
-    NSString* urlStr = [_remote.absoluteString stringByAppendingString: relativePath];
-    NSURL* url = [NSURL URLWithString: urlStr];
+    NSURL* url;
+    if ([relativePath hasPrefix: @"/"]) {
+        url = [[NSURL URLWithString: relativePath relativeToURL: _remote] absoluteURL];
+    } else {
+        url = [_remote URLByAppendingPathComponent: relativePath];
+    }
     onCompletion = [onCompletion copy];
     
     // under ARC, using variable req used directly inside the block results in a compiler error (it could have undefined value).
@@ -508,7 +553,7 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
     [self asyncTaskStarted];
     TDRemoteJSONRequest* request = 
         [self sendAsyncRequest: @"GET"
-                          path: [@"/_local/" stringByAppendingString: checkpointID]
+                          path: [@"_local/" stringByAppendingString: checkpointID]
                           body: nil
                   onCompletion: ^(id response, NSError* error) {
                   // Got the response:
@@ -563,7 +608,7 @@ NSString* TDReplicatorStoppedNotification = @"TDReplicatorStopped";
     _savingCheckpoint = YES;
     NSString* checkpointID = self.remoteCheckpointDocID;
     [self sendAsyncRequest: @"PUT"
-                      path: [@"/_local/" stringByAppendingString: checkpointID]
+                      path: [@"_local/" stringByAppendingString: checkpointID]
                       body: body
               onCompletion: ^(id response, NSError* error) {
                   _savingCheckpoint = NO;

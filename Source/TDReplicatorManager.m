@@ -25,6 +25,7 @@
 #import "TDPuller.h"
 #import "TD_View.h"
 #import "TDOAuth1Authorizer.h"
+#import "TDBrowserIDAuthorizer.h"
 #import "TDInternal.h"
 #import "TDMisc.h"
 #import "MYBlockUtils.h"
@@ -168,18 +169,26 @@ static NSDictionary* parseSourceOrTarget(NSDictionary* properties, NSString* key
     if (outAuthorizer) {
         *outAuthorizer = nil;
         NSDictionary* auth = $castIf(NSDictionary, remoteDict[@"auth"]);
-        NSDictionary* oauth = $castIf(NSDictionary, auth[@"oauth"]);
-        if (oauth) {
-            NSString* consumerKey = $castIf(NSString, oauth[@"consumer_key"]);
-            NSString* consumerSec = $castIf(NSString, oauth[@"consumer_secret"]);
-            NSString* token = $castIf(NSString, oauth[@"token"]);
-            NSString* tokenSec = $castIf(NSString, oauth[@"token_secret"]);
-            NSString* sigMethod = $castIf(NSString, oauth[@"signature_method"]);
-            *outAuthorizer = [[TDOAuth1Authorizer alloc] initWithConsumerKey: consumerKey
-                                                               consumerSecret: consumerSec
-                                                                        token: token
-                                                                  tokenSecret: tokenSec
-                                                              signatureMethod: sigMethod];
+        if (auth) {
+            NSDictionary* oauth = $castIf(NSDictionary, auth[@"oauth"]);
+            if (oauth) {
+                NSString* consumerKey = $castIf(NSString, oauth[@"consumer_key"]);
+                NSString* consumerSec = $castIf(NSString, oauth[@"consumer_secret"]);
+                NSString* token = $castIf(NSString, oauth[@"token"]);
+                NSString* tokenSec = $castIf(NSString, oauth[@"token_secret"]);
+                NSString* sigMethod = $castIf(NSString, oauth[@"signature_method"]);
+                *outAuthorizer = [[TDOAuth1Authorizer alloc] initWithConsumerKey: consumerKey
+                                                                   consumerSecret: consumerSec
+                                                                            token: token
+                                                                      tokenSecret: tokenSec
+                                                                  signatureMethod: sigMethod];
+            } else {
+                NSDictionary* browserid = $castIf(NSDictionary, auth[@"browserid"]);
+                if (browserid) {
+                    NSString* assertion = $castIf(NSString, browserid[@"assertion"]);
+                    *outAuthorizer = [[TDBrowserIDAuthorizer alloc] initWithAssertion: assertion];
+                }
+            }
             if (!*outAuthorizer)
                 return kTDStatusBadRequest;
         }
@@ -340,14 +349,12 @@ static NSDictionary* parseSourceOrTarget(NSDictionary* properties, NSString* key
     BOOL continuous = [$castIf(NSNumber, properties[@"continuous"]) boolValue];
     LogTo(Sync, @"TDReplicatorManager creating (remote=%@, push=%d, create=%d, continuous=%d)",
           remote, push, createTarget, continuous);
-    TDReplicator* repl = [localDb replicatorWithRemoteURL: remote
+    TDReplicator* repl = [[TDReplicator alloc] initWithDB: localDb
+                                                   remote: remote
                                                      push: push
                                                continuous: continuous];
     if (!repl)
         return;
-    if (!_replicatorsByDocID)
-        _replicatorsByDocID = [[NSMutableDictionary alloc] init];
-    _replicatorsByDocID[rev.docID] = repl;
     NSString* replicationID = properties[@"_replication_id"] ?: TDCreateUUID();
     repl.sessionID = replicationID;
     repl.filterName = $castIf(NSString, properties[@"filter"]);;
@@ -357,6 +364,10 @@ static NSDictionary* parseSourceOrTarget(NSDictionary* properties, NSString* key
     repl.authorizer = authorizer;
     if (push)
         ((TDPusher*)repl).createTarget = createTarget;
+    
+    if (!_replicatorsByDocID)
+        _replicatorsByDocID = [[NSMutableDictionary alloc] init];
+    _replicatorsByDocID[rev.docID] = repl;
     
     [[NSNotificationCenter defaultCenter] addObserver: self
                                              selector: @selector(replicatorChanged:)
