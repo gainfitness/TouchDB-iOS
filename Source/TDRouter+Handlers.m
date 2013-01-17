@@ -185,8 +185,8 @@
     _response.bodyObject = $dict({@"db_name", db.name},
                                  {@"db_uuid", db.publicUUID},
                                  {@"doc_count", @(num_docs)},
-                                 {@"update_seq", @(update_seq)},
-                                 {@"disk_size", @(db.totalDataSize)});
+                                 {@"update_seq", @(update_seq)});//,
+                                 //{@"disk_size", @(db.totalDataSize)});
     return kTDStatusOK;
 }
 
